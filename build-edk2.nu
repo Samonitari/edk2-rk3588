@@ -1,6 +1,14 @@
 #!/usr/bin/env nu
 const rootdir = path self .
 
+def allowed-devices []: nothing -> list<string> {
+  ls ([$rootdir configs] | path join)
+  | get name
+  | path basename
+  | path parse
+  | get stem
+}
+
 def shell-quote [value: string] {
   [
     "'"
@@ -407,15 +415,15 @@ def distclean [rootdir: path, outdir: path] {
 
 # Build EDK2 firmware for Rockchip RK3588 platforms.
 export def --env main [
-  --device(-d): string              # Build for this device, or `all` for every board config.
-  --release(-r): string = "DEBUG"   # Build profile passed to TF-A and EDK2: `DEBUG` or `RELEASE`.
-  --toolchain(-t): string = "GCC"   # EDK2 toolchain tag, for example `GCC`.
-  --vendor-tfa                      # Use BL31 from `misc/rkbin` instead of building `arm-trusted-firmware`.
-  --tfa-flags: string = ""          # Extra flags appended verbatim to the TF-A `make` command.
-  --edk2-flags: string = ""         # Extra flags appended verbatim to the EDK2 `build` command.
-  --skip-patchsets                  # Skip reapplying local patchsets to upstream submodules.
-  --clean(-C)                       # Remove the workspace and generated flash images from the current output dir.
-  --distclean(-D)                   # Run `git clean -xdf` from the repo root when available.
+  ...devices: string@allowed-devices  # Build for this device, or `all` for every board config.
+  --release(-r): string = "DEBUG"     # Build profile passed to TF-A and EDK2: `DEBUG` or `RELEASE`.
+  --toolchain(-t): string = "GCC"     # EDK2 toolchain tag, for example `GCC`.
+  --vendor-tfa                        # Use BL31 from `misc/rkbin` instead of building `arm-trusted-firmware`.
+  --tfa-flags: string = ""            # Extra flags appended verbatim to the TF-A `make` command.
+  --edk2-flags: string = ""           # Extra flags appended verbatim to the EDK2 `build` command.
+  --skip-patchsets                    # Skip reapplying local patchsets to upstream submodules.
+  --clean(-C)                         # Remove the workspace and generated flash images from the current output dir.
+  --distclean(-D)                     # Run `git clean -xdf` from the repo root when available.
 ] {
   let outdir = $env.PWD | path expand
 
@@ -429,16 +437,14 @@ export def --env main [
     return
   }
 
-  let normalized_device = if ($device | is-empty) { "" } else {
-    $device | str downcase
-  }
-  if $normalized_device == "" {
-    error make "Missing required option: --device. See `build.nu --help`."
-  }
-
-  let device_config = [$rootdir "configs" $"($normalized_device).conf"] | path join
-  if ($normalized_device != "all") and not ($device_config | path exists) {
-    error make "Device configuration not found"
+  let allowed_devices = allowed-devices
+  if not (
+    $devices
+    | reduce -f true {|it, acc|
+        $acc and ($it in $allowed_devices)
+    }
+  ) {
+    error make -u $"Unknown device in: ($devices)\t\nAllowed ones: ($allowed_devices)"
   }
 
   let raw_machine_type = (^uname -m | str trim)
@@ -480,36 +486,13 @@ export def --env main [
   let release_type = $release | str upcase
   let open_tfa = (not $vendor_tfa)
 
-  if $normalized_device == "all" {
-    let devices = (
-      ls ([$rootdir "configs"] | path join)
-      | where {|entry|
-          ($entry.type == "file") and ((($entry.name | path parse).extension | default "") == "conf")
-      }
-      | get name
-      | each {|name| $name | path basename | str replace --regex '\.conf$' "" }
-      | where {|name| $name != "RK3588" }
-      | sort
-    )
-
-    for dev in $devices {
-      print $"Building ($dev)"
-      (build-device
-        $ctx
-        $dev
-        $release_type
-        $toolchain
-        $open_tfa
-        $tfa_flags
-        $edk2_flags
-        $skip_patchsets
-        $git_commit
-      )
-    }
-  } else {
+  $devices
+  | default -e $allowed_devices
+  | each {|dev|
+    print $"Building ($dev)"
     (build-device
       $ctx
-      $normalized_device
+      $dev
       $release_type
       $toolchain
       $open_tfa
