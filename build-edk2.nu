@@ -9,14 +9,6 @@ def allowed-devices []: nothing -> list<string> {
   | get stem
 }
 
-def shell-quote [value: string] {
-  [
-    "'"
-    ($value | str replace -a "'" "'\"'\"'")
-    "'"
-  ] | str join ""
-}
-
 def load-config [config_path: path] {
   if not ($config_path | path exists) {
     error make $"Configuration not found: ($config_path)"
@@ -41,6 +33,12 @@ def cfg-get [cfg: record, key: string] {
     $cfg | get $key
   } else {
     error make $"Missing required config key: ($key)"
+  }
+}
+
+def require-path [path: path, label: string] {
+  if not ($path | path exists) {
+    error make $"Required ($label) not found: ($path)"
   }
 }
 
@@ -71,13 +69,6 @@ def ini-regex-value [ini_path: path, pattern: string] {
   )
 
   $line | split row "=" | skip 1 | str join "=" | str trim
-}
-
-def --env run-bash-in [dir: path, cmd: string] {
-  do --env {
-    cd $dir
-    ^bash -lc $cmd
-  }
 }
 
 def apply-patchset [patches_dir: path, target_dir: path, skip_patchsets: bool] {
@@ -287,8 +278,8 @@ def --env build-device [
   release_type: string
   toolchain: string
   open_tfa: bool
-  tfa_flags: string
-  edk2_flags: string
+  tfa_flags: list<string>
+  edk2_flags: list<string>
   skip_patchsets: bool
   git_commit: string
 ] {
@@ -311,24 +302,16 @@ def --env build-device [
     )
 
     let debug = if $release_type == "DEBUG" { "1" } else { "0" }
-    mut tfa_cmd = $"make PLAT=(shell-quote $tfa_plat) DEBUG=($debug) all"
-    if $tfa_flags != "" {
-      $tfa_cmd = $"($tfa_cmd) ($tfa_flags)"
+    do --env {
+      cd ([$ctx.rootdir "arm-trusted-firmware"] | path join)
+      ^make PLAT=$tfa_plat DEBUG=$debug all ...$tfa_flags
     }
-
-    run-bash-in ([$ctx.rootdir "arm-trusted-firmware"] | path join) $tfa_cmd
   }
 
-  (apply-patchset
-    ([$ctx.rootdir "edk2-patches"] | path join)
-    ([$ctx.rootdir "edk2"] | path join)
-    $skip_patchsets
-  )
-  (apply-patchset
-    ([$ctx.rootdir "devicetree" "mainline" "patches"] | path join)
-    ([$ctx.rootdir "devicetree" "mainline" "upstream"] | path join)
-    $skip_patchsets
-  )
+  require-path ([$ctx.rootdir "edk2"] | path join) "EDK2 source tree"
+  require-path ([$ctx.rootdir "devicetree" "mainline" "upstream"] | path join) "mainline device tree source tree"
+  apply-patchset ([$ctx.rootdir "edk2-patches"] | path join) ([$ctx.rootdir "edk2"] | path join) $skip_patchsets
+  apply-patchset ([$ctx.rootdir "devicetree" "mainline" "patches"] | path join) ([$ctx.rootdir "devicetree" "mainline" "upstream"] | path join) $skip_patchsets
 
   let conf_dir = [$ctx.workspace "Conf"] | path join
   if not ($conf_dir | path exists) {
@@ -347,50 +330,33 @@ def --env build-device [
     ]
     | str join (char esep)
   )
+  let edk_tools_path = [$ctx.rootdir "edk2" "BaseTools"] | path join
+  let conf_path = $conf_dir
+  let path_dirs = [
+    ([$edk_tools_path "BinWrappers" "PosixLike"] | path join)
+    ($env.PATH? | default "")
+  ] | where {|entry| $entry != "" }
+  let build_tool = [$edk_tools_path "BinWrappers" "PosixLike" "build"] | path join
 
   with-env {
     WORKSPACE: $ctx.workspace
     PACKAGES_PATH: $packages_path
+    EDK_TOOLS_PATH: $edk_tools_path
+    CONF_PATH: $conf_path
+    PATH: ($path_dirs | str join (char esep))
     GCC_AARCH64_PREFIX: $ctx.cross_compile
     CLANG38_AARCH64_PREFIX: $ctx.cross_compile
   } {
     ^make -C ([$ctx.rootdir "edk2" "BaseTools"] | path join)
 
-    let edksetup = [$ctx.rootdir "edk2" "edksetup.sh"] | path join
     let dsc_path = [$ctx.rootdir $dsc_file] | path join
-    mut build_cmd = [
-      $"source (shell-quote $edksetup)"
-      "&&"
-      "build"
-      "-s"
-      "-n 0"
-      "-a AARCH64"
-      $"-t (shell-quote $toolchain)"
-      $"-p (shell-quote $dsc_path)"
-      $"-b (shell-quote $release_type)"
-      $"-D FIRMWARE_VER=(shell-quote $git_commit)"
-      "-D NETWORK_ALLOW_HTTP_CONNECTIONS=TRUE"
-      "-D NETWORK_ISCSI_ENABLE=TRUE"
-      "-D INCLUDE_TFTP_COMMAND=TRUE"
-      "--pcd gRockchipTokenSpaceGuid.PcdFitImageFlashAddress=0x100000"
-    ] | str join " "
-
-    if $edk2_flags != "" {
-        $build_cmd = $"($build_cmd) ($edk2_flags)"
+    do --env {
+      cd $ctx.rootdir
+      ^$build_tool -s -n 0 -a AARCH64 -t $toolchain -p $dsc_path -b $release_type -D $"FIRMWARE_VER=($git_commit)" -D NETWORK_ALLOW_HTTP_CONNECTIONS=TRUE -D NETWORK_ISCSI_ENABLE=TRUE -D INCLUDE_TFTP_COMMAND=TRUE --pcd gRockchipTokenSpaceGuid.PcdFitImageFlashAddress=0x100000 ...$edk2_flags
     }
-
-    run-bash-in $ctx.rootdir $build_cmd
   }
 
-  (pack-image
-    $ctx
-    $device
-    $release_type
-    $toolchain
-    $open_tfa
-    $platform_name
-    $soc_cfg
-  )
+  pack-image $ctx $device $release_type $toolchain $open_tfa $platform_name $soc_cfg
   print "Build done: RK3588_NOR_FLASH.img"
 }
 
@@ -407,7 +373,10 @@ def clean [outdir: path] {
 
 def distclean [rootdir: path, outdir: path] {
   if (([$rootdir ".git"] | path join) | path exists) {
-    run-bash-in $rootdir "git clean -xdf"
+    do --env {
+      cd $rootdir
+      ^git clean -xdf
+    }
   } else {
     clean $outdir
   }
@@ -419,8 +388,8 @@ export def --env main [
   --release(-r): string = "DEBUG"     # Build profile passed to TF-A and EDK2: `DEBUG` or `RELEASE`.
   --toolchain(-t): string = "GCC"     # EDK2 toolchain tag, for example `GCC`.
   --vendor-tfa                        # Use BL31 from `misc/rkbin` instead of building `arm-trusted-firmware`.
-  --tfa-flags: string = ""            # Extra flags appended verbatim to the TF-A `make` command.
-  --edk2-flags: string = ""           # Extra flags appended verbatim to the EDK2 `build` command.
+  --tfa-flags: list<string> = []      # Extra arguments appended to the TF-A `make` command.
+  --edk2-flags: list<string> = []     # Extra arguments appended to the EDK2 `build` command.
   --skip-patchsets                    # Skip reapplying local patchsets to upstream submodules.
   --clean(-C)                         # Remove the workspace and generated flash images from the current output dir.
   --distclean(-D)                     # Run `git clean -xdf` from the repo root when available.
@@ -489,17 +458,9 @@ export def --env main [
   $devices
   | default -e $allowed_devices
   | each {|dev|
-    print $"Building ($dev)"
-    (build-device
-      $ctx
-      $dev
-      $release_type
-      $toolchain
-      $open_tfa
-      $tfa_flags
-      $edk2_flags
-      $skip_patchsets
-      $git_commit
-    )
+    ignore;
+    print $"Building ($dev)";
+    build-device $ctx $dev $release_type $toolchain $open_tfa $tfa_flags $edk2_flags $skip_patchsets $git_commit
   }
+  | ignore
 }
