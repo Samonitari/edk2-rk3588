@@ -1,5 +1,8 @@
 #!/usr/bin/env nu
 const rootdir = path self .
+use std/dirs
+
+def allowed-release-types []: nothing -> list<string> {[DEBUG RELEASE]}
 
 def allowed-devices []: nothing -> list<string> {
   ls ([$rootdir configs] | path join)
@@ -115,23 +118,25 @@ def apply-patchset [patches_dir: path, target_dir: path, skip_patchsets: bool] {
   }
 
   print "Patchset needs to be (re)applied"
-  ^git -C $target_dir reset --hard
-  ^git -C $target_dir clean -xfd
+  git -C $target_dir reset --hard
+  git -C $target_dir clean -xfd
 
-  mut patch_count = 0
-  for patch_file in ($patch_files | get name) {
-    let patch_name = $patch_file | path basename
-    print $"Patch ($patch_count): ($patch_name)"
-    ^patch -p1 -d $target_dir -i $patch_file
-    print "  Successfully applied"
-    $patch_count = $patch_count + 1
+  let patch_results = $patch_files
+  | each {|patch_file|
+    patch -p1 -d $target_dir -i $patch_file.name
+    | complete
+    | tee {
+      match $in.exit_code {
+        0 => (print $"Succesfully applied: ($patch_file.name | path basename)")
+        1 => (error make $"Failed to apply ($patch_file.name | path basename)")
+      }
+    }
   }
-
-  ^touch $patchset_marker
-  print $"Patchset summary: ($patch_count) applied"
+  touch $patchset_marker
+  print $"Patchset summary: ($patch_results | length) applied"
 }
 
-def --env build-idblock [ctx: record, soc_cfg: record] {
+def build-idblock [ctx: record, soc_cfg: record] {
   print " => Building idblock.bin"
 
   let miniall_ini = (cfg-get $soc_cfg "MINIALL_INI")
@@ -141,28 +146,26 @@ def --env build-idblock [ctx: record, soc_cfg: record] {
   let spl = [$ctx.rootdir "misc" "rk3588_spl_v1.12.bin"] | path join
   let mkimage = [$ctx.rootdir "misc" "tools" $ctx.machine_type "mkimage"] | path join
 
-  do --env {
-    cd $ctx.workspace
+  dirs add $ctx.workspace
+  rm-glob "rk35*_spl_loader_*.bin"
+  rm-glob "rk35*_ddr_*.bin"
+  rm-glob "rk35*_usbplug*.bin"
+  rm-glob "FlashHead.bin"
+  rm-glob "FlashData.bin"
+  rm-glob "FlashBoot.bin"
+  rm-glob "UsbHead.bin"
+  rm-glob "idblock.bin"
 
-    rm-glob "rk35*_spl_loader_*.bin"
-    rm-glob "rk35*_ddr_*.bin"
-    rm-glob "rk35*_usbplug*.bin"
-    rm-glob "FlashHead.bin"
-    rm-glob "FlashData.bin"
-    rm-glob "FlashBoot.bin"
-    rm-glob "UsbHead.bin"
-    rm-glob "idblock.bin"
-
-    ^$mkimage -n rk3588 -T rksd -d $"($ddrbin):($spl)" idblock.bin
-  }
+  (^$mkimage -n rk3588 -T rksd -d $"($ddrbin):($spl)" idblock.bin)
+  dirs drop
 
   print " => idblock.bin build done"
 }
 
-def --env build-fit [
+def build-fit [
   ctx: record
   device: string
-  release_type: string
+  release_type: string@allowed-release-types
   toolchain: string
   open_tfa: bool
   platform_name: string
@@ -207,33 +210,31 @@ def --env build-fit [
   let mkimage = [$ctx.rootdir "misc" "tools" $ctx.machine_type "mkimage"] | path join
   let extractbl31 = [$ctx.rootdir "misc" "extractbl31.py"] | path join
 
-  do --env {
-    cd $ctx.workspace
-
-    rm-glob "bl31_0x*.bin"
-    if ("BL33_AP_UEFI.Fv" | path exists) {
-      rm --force "BL33_AP_UEFI.Fv"
-    }
-    if ($its_path | path exists) {
-      rm --force $its_path
-    }
-
-    ^python3 $extractbl31 $bl31
-    if not ("bl31_0x000f0000.bin" | path exists) {
-      ^touch "bl31_0x000f0000.bin"
-    }
-
-    ^cp $bl32 "bl32.bin"
-    ^cp $dtb_source $dtb_path
-    ^cp $fv_path "BL33_AP_UEFI.Fv"
-    open $its_template | str replace -a "@DEVICE@" $device | save --force $its_path
-    ^$mkimage -f $its_path -E $itb_path
+  dirs add $ctx.workspace
+  rm-glob "bl31_0x*.bin"
+  if ("BL33_AP_UEFI.Fv" | path exists) {
+    rm --force "BL33_AP_UEFI.Fv"
   }
+  if ($its_path | path exists) {
+    rm --force $its_path
+  }
+
+  python3 $extractbl31 $bl31
+  if not ("bl31_0x000f0000.bin" | path exists) {
+    touch "bl31_0x000f0000.bin"
+  }
+
+  cp $bl32 "bl32.bin"
+  cp $dtb_source $dtb_path
+  cp $fv_path "BL33_AP_UEFI.Fv"
+  open $its_template | str replace -a "@DEVICE@" $device | save --force $its_path
+  ^$mkimage -f $its_path -E $itb_path
+  dirs drop
 
   print " => FIT build done"
 }
 
-def --env pack-image [
+def pack-image [
   ctx: record
   device: string
   release_type: string
@@ -272,7 +273,7 @@ def --env pack-image [
   ^cp $flash_img $ctx.rootdir
 }
 
-def --env build-device [
+def build-device [
   ctx: record
   device: string
   release_type: string
@@ -302,10 +303,10 @@ def --env build-device [
     )
 
     let debug = if $release_type == "DEBUG" { "1" } else { "0" }
-    do --env {
-      cd ([$ctx.rootdir "arm-trusted-firmware"] | path join)
-      ^make PLAT=$tfa_plat DEBUG=$debug all ...$tfa_flags
-    }
+    dirs add ([$ctx.rootdir "arm-trusted-firmware"] | path join)
+    let tfa_result  = make $"PLAT=($tfa_plat)" $"DEBUG=($debug)" all ...$tfa_flags | complete
+    dirs drop
+    if $tfa_result.exit_code != 0 { error make $tfa_result.stderr}
   }
 
   require-path ([$ctx.rootdir "edk2"] | path join) "EDK2 source tree"
@@ -350,17 +351,17 @@ def --env build-device [
     ^make -C ([$ctx.rootdir "edk2" "BaseTools"] | path join)
 
     let dsc_path = [$ctx.rootdir $dsc_file] | path join
-    do --env {
-      cd $ctx.rootdir
-      ^$build_tool -s -n 0 -a AARCH64 -t $toolchain -p $dsc_path -b $release_type -D $"FIRMWARE_VER=($git_commit)" -D NETWORK_ALLOW_HTTP_CONNECTIONS=TRUE -D NETWORK_ISCSI_ENABLE=TRUE -D INCLUDE_TFTP_COMMAND=TRUE --pcd gRockchipTokenSpaceGuid.PcdFitImageFlashAddress=0x100000 ...$edk2_flags
-    }
+    dirs add $ctx.rootdir
+    ^$build_tool -s -n 0 -a AARCH64 -t $toolchain -p $dsc_path -b $release_type -D $"FIRMWARE_VER=($git_commit)" -D NETWORK_ALLOW_HTTP_CONNECTIONS=TRUE -D NETWORK_ISCSI_ENABLE=TRUE -D INCLUDE_TFTP_COMMAND=TRUE --pcd gRockchipTokenSpaceGuid.PcdFitImageFlashAddress=0x100000 ...$edk2_flags
+    dirs drop
   }
 
   pack-image $ctx $device $release_type $toolchain $open_tfa $platform_name $soc_cfg
   print "Build done: RK3588_NOR_FLASH.img"
 }
 
-def clean [outdir: path] {
+# Remove the workspace and generated flash images from the current output dir.
+export def clean [outdir: path] {
   let workspace = [$outdir "workspace"] | path join
   if ($workspace | path exists) {
     rm --recursive --force $workspace
@@ -371,77 +372,51 @@ def clean [outdir: path] {
   }
 }
 
-def distclean [rootdir: path, outdir: path] {
+# Run `git clean -xdf` from the repo root when available.
+export def distclean [rootdir: path, outdir: path] {
   if (([$rootdir ".git"] | path join) | path exists) {
-    do --env {
-      cd $rootdir
-      ^git clean -xdf
-    }
+    dirs add $rootdir
+    git clean -xdf
+    dirs drop
   } else {
     clean $outdir
   }
 }
 
 # Build EDK2 firmware for Rockchip RK3588 platforms.
-export def --env main [
-  ...devices: string@allowed-devices  # Build for this device, or `all` for every board config.
-  --release(-r): string = "DEBUG"     # Build profile passed to TF-A and EDK2: `DEBUG` or `RELEASE`.
-  --toolchain(-t): string = "GCC"     # EDK2 toolchain tag, for example `GCC`.
-  --vendor-tfa                        # Use BL31 from `misc/rkbin` instead of building `arm-trusted-firmware`.
-  --tfa-flags: list<string> = []      # Extra arguments appended to the TF-A `make` command.
-  --edk2-flags: list<string> = []     # Extra arguments appended to the EDK2 `build` command.
-  --skip-patchsets                    # Skip reapplying local patchsets to upstream submodules.
-  --clean(-C)                         # Remove the workspace and generated flash images from the current output dir.
-  --distclean(-D)                     # Run `git clean -xdf` from the repo root when available.
+export def main [
+  ...devices: string@allowed-devices                     # Build for this device, or `all` for every board config.
+  --release(-r): string@allowed-release-types = "DEBUG"  # Build profile passed to TF-A and EDK2: `DEBUG` or `RELEASE`.
+  --toolchain(-t): string = "GCC"                        # EDK2 toolchain tag, for example `GCC`.
+  --vendor-tfa                                           # Use BL31 from `misc/rkbin` instead of building `arm-trusted-firmware`.
+  --tfa-flags: list<string> = []                         # Extra arguments appended to the TF-A `make` command.
+  --edk2-flags: list<string> = []                        # Extra arguments appended to the EDK2 `build` command.
+  --skip-patchsets                                       # Skip reapplying local patchsets to upstream submodules.
 ] {
-  let outdir = $env.PWD | path expand
-
-  if $distclean {
-    distclean $rootdir $outdir
-    return
-  }
-
-  if $clean {
-    clean $outdir
-    return
-  }
-
   let allowed_devices = allowed-devices
-  if not (
-    $devices
-    | reduce -f true {|it, acc|
-        $acc and ($it in $allowed_devices)
-    }
-  ) {
+  if ($devices | any {|dev| not ($dev in $allowed_devices)}) {
     error make -u $"Unknown device in: ($devices)\t\nAllowed ones: ($allowed_devices)"
   }
 
-  let raw_machine_type = (^uname -m | str trim)
-  let machine_type = if $raw_machine_type == "arm64" {
-    "aarch64"
-  } else if $raw_machine_type == "amd64" {
-    "x86_64"
-  } else {
-    $raw_machine_type
+  if not (($release | str upcase) in (allowed-release-types)) {
+    error make -u $"Unknown release type: ($release)\t\nAllowed ones \(automatically upcased\): (allowed-release-types)"
   }
 
+  let machine_type = (uname | get machine)
   if ($machine_type != "aarch64") and (($env.CROSS_COMPILE? | default "") == "") {
     $env.CROSS_COMPILE = "aarch64-linux-gnu-"
   }
 
-  let describe = (^git describe --tags --always | complete)
-  let git_commit = if $describe.exit_code == 0 {
-    $describe.stdout | str trim
-  } else {
-    "unknown"
+  dirs add $rootdir
+  let git_commit = git describe --tags --always | complete
+  | match $in {
+    {exit_code: 0 stdout: $out} => ($out | str trim)
+    _                           => "unknown"
   }
 
+  let outdir = $env.PWD | path expand
   let workspace = [$outdir "workspace"] | path join
-  if not ($workspace | path exists) {
-    mkdir $workspace
-  }
-
-  cd $rootdir
+  mkdir $workspace
 
   let ctx = {
     rootdir: $rootdir
@@ -452,7 +427,6 @@ export def --env main [
     soc: ""
   }
 
-  let release_type = $release | str upcase
   let open_tfa = (not $vendor_tfa)
 
   $devices
@@ -460,7 +434,11 @@ export def --env main [
   | each {|dev|
     ignore;
     print $"Building ($dev)";
-    build-device $ctx $dev $release_type $toolchain $open_tfa $tfa_flags $edk2_flags $skip_patchsets $git_commit
+    try {
+      build-device $ctx $dev ($release | str upcase) $toolchain $open_tfa $tfa_flags $edk2_flags $skip_patchsets $git_commit
+    } catch {|e|
+      error make -u $"Build failed with error: ($e.msg)"
+    }
   }
   | ignore
 }
