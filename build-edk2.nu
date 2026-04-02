@@ -1,0 +1,522 @@
+#!/usr/bin/env nu
+const rootdir = path self .
+
+def shell-quote [value: string] {
+  [
+    "'"
+    ($value | str replace -a "'" "'\"'\"'")
+    "'"
+  ] | str join ""
+}
+
+def load-config [config_path: path] {
+  if not ($config_path | path exists) {
+    error make $"Configuration not found: ($config_path)"
+  }
+
+  open $config_path
+  | lines
+  | where {|line|
+    let trimmed = $line | str trim
+    ($trimmed != "") and (not ($trimmed | str starts-with "#"))
+  }
+  | reduce -f {} {|line, acc|
+    let parts = $line | split row "="
+    let key = $parts | first | str trim
+    let value = $parts | skip 1 | str join "=" | str trim
+    $acc | upsert $key $value
+  }
+}
+
+def cfg-get [cfg: record, key: string] {
+  if $key in ($cfg | columns) {
+    $cfg | get $key
+  } else {
+    error make $"Missing required config key: ($key)"
+  }
+}
+
+def rm-glob [pattern: string] {
+  let matches = (glob $pattern)
+  if ($matches | length) > 0 {
+    rm --force ...$matches
+  }
+}
+
+def ini-value [ini_path: path, key: string] {
+  let line = (
+    open $ini_path
+    | lines
+    | where {|entry| $entry | str starts-with $"($key)="}
+    | first
+  )
+
+  $line | split row "=" | skip 1 | str join "=" | str trim
+}
+
+def ini-regex-value [ini_path: path, pattern: string] {
+  let line = (
+    open $ini_path
+    | lines
+    | where {|entry| $entry =~ $pattern}
+    | first
+  )
+
+  $line | split row "=" | skip 1 | str join "=" | str trim
+}
+
+def --env run-bash-in [dir: path, cmd: string] {
+  do --env {
+    cd $dir
+    ^bash -lc $cmd
+  }
+}
+
+def apply-patchset [patches_dir: path, target_dir: path, skip_patchsets: bool] {
+  if $skip_patchsets {
+    return
+  }
+
+  if not ($patches_dir | path exists) {
+    return
+  }
+
+  if not ($target_dir | path exists) {
+    error make $"Patchset target directory does not exist: ($target_dir)"
+  }
+
+  let patch_files = (
+    ls $patches_dir
+    | where {|entry|
+        ($entry.type == "file") and ((($entry.name | path parse).extension | default "") == "patch")
+    }
+    | sort-by name
+  )
+
+  if ($patch_files | length) == 0 {
+    return
+  }
+
+  print $"Checking patchset ($patches_dir) for ($target_dir)"
+
+  let patchset_name = $patches_dir | path basename
+  let patchset_marker = [$target_dir $".patchset_($patchset_name)"] | path join
+  let marker_exists = $patchset_marker | path exists
+
+  let needs_apply = if not $marker_exists {
+    true
+  } else {
+    let marker_mtime = ls $patchset_marker | get modified | first
+    $patch_files | get modified | any {|mtime| $mtime > $marker_mtime}
+  }
+
+  if not $needs_apply {
+    print "Patchset already applied - skipping"
+    return
+  }
+
+  print "Patchset needs to be (re)applied"
+  ^git -C $target_dir reset --hard
+  ^git -C $target_dir clean -xfd
+
+  mut patch_count = 0
+  for patch_file in ($patch_files | get name) {
+    let patch_name = $patch_file | path basename
+    print $"Patch ($patch_count): ($patch_name)"
+    ^patch -p1 -d $target_dir -i $patch_file
+    print "  Successfully applied"
+    $patch_count = $patch_count + 1
+  }
+
+  ^touch $patchset_marker
+  print $"Patchset summary: ($patch_count) applied"
+}
+
+def --env build-idblock [ctx: record, soc_cfg: record] {
+  print " => Building idblock.bin"
+
+  let miniall_ini = (cfg-get $soc_cfg "MINIALL_INI")
+  let rkboot_ini = [$ctx.rootdir "misc" "rkbin" "RKBOOT" $miniall_ini] | path join
+  let ddrbin_rkbin = (ini-value $rkboot_ini "FlashData")
+  let ddrbin = [$ctx.rootdir "misc" "rkbin" $ddrbin_rkbin] | path join
+  let spl = [$ctx.rootdir "misc" "rk3588_spl_v1.12.bin"] | path join
+  let mkimage = [$ctx.rootdir "misc" "tools" $ctx.machine_type "mkimage"] | path join
+
+  do --env {
+    cd $ctx.workspace
+
+    rm-glob "rk35*_spl_loader_*.bin"
+    rm-glob "rk35*_ddr_*.bin"
+    rm-glob "rk35*_usbplug*.bin"
+    rm-glob "FlashHead.bin"
+    rm-glob "FlashData.bin"
+    rm-glob "FlashBoot.bin"
+    rm-glob "UsbHead.bin"
+    rm-glob "idblock.bin"
+
+    ^$mkimage -n rk3588 -T rksd -d $"($ddrbin):($spl)" idblock.bin
+  }
+
+  print " => idblock.bin build done"
+}
+
+def --env build-fit [
+  ctx: record
+  device: string
+  release_type: string
+  toolchain: string
+  open_tfa: bool
+  platform_name: string
+  soc_cfg: record
+] {
+  print " => Building FIT"
+
+  let trust_ini = (cfg-get $soc_cfg "TRUST_INI")
+  let tfa_plat = (cfg-get $soc_cfg "TFA_PLAT")
+  let trust_path = [$ctx.rootdir "misc" "rkbin" "RKTRUST" $trust_ini] | path join
+  let soc_l = $ctx.soc | str downcase
+  let bl31_rkbin = (ini-regex-value $trust_path '^PATH=.*_bl31_')
+  let bl32_rkbin = (ini-regex-value $trust_path '^PATH=.*_bl32_')
+  let bl32 = [$ctx.rootdir "misc" "rkbin" $bl32_rkbin] | path join
+  let bl31 = if $open_tfa {
+    (
+      [
+          $ctx.rootdir
+          "arm-trusted-firmware"
+          "build"
+          $tfa_plat
+          ($release_type | str downcase)
+          "bl31"
+          "bl31.elf"
+      ]
+      | path join
+    )
+  } else {
+    ([$ctx.rootdir "misc" "rkbin" $bl31_rkbin] | path join)
+  }
+
+  let build_dir = (
+    [$ctx.workspace "Build" $platform_name $"($release_type)_($toolchain)" "FV"]
+    | path join
+  )
+  let fv_path = [$build_dir "BL33_AP_UEFI.Fv"] | path join
+  let its_template = [$ctx.rootdir "misc" $"uefi_($soc_l).its"] | path join
+  let its_path = [$ctx.workspace $"($soc_l)_($device)_EFI.its"] | path join
+  let itb_path = [$ctx.workspace $"($device)_EFI.itb"] | path join
+  let dtb_source = [$ctx.rootdir "misc" $"($soc_l)_spl.dtb"] | path join
+  let dtb_path = [$ctx.workspace $"($device).dtb"] | path join
+  let mkimage = [$ctx.rootdir "misc" "tools" $ctx.machine_type "mkimage"] | path join
+  let extractbl31 = [$ctx.rootdir "misc" "extractbl31.py"] | path join
+
+  do --env {
+    cd $ctx.workspace
+
+    rm-glob "bl31_0x*.bin"
+    if ("BL33_AP_UEFI.Fv" | path exists) {
+      rm --force "BL33_AP_UEFI.Fv"
+    }
+    if ($its_path | path exists) {
+      rm --force $its_path
+    }
+
+    ^python3 $extractbl31 $bl31
+    if not ("bl31_0x000f0000.bin" | path exists) {
+      ^touch "bl31_0x000f0000.bin"
+    }
+
+    ^cp $bl32 "bl32.bin"
+    ^cp $dtb_source $dtb_path
+    ^cp $fv_path "BL33_AP_UEFI.Fv"
+    open $its_template | str replace -a "@DEVICE@" $device | save --force $its_path
+    ^$mkimage -f $its_path -E $itb_path
+  }
+
+  print " => FIT build done"
+}
+
+def --env pack-image [
+  ctx: record
+  device: string
+  release_type: string
+  toolchain: string
+  open_tfa: bool
+  platform_name: string
+  soc_cfg: record
+] {
+  build-idblock $ctx $soc_cfg
+  (build-fit
+    $ctx
+    $device
+    $release_type
+    $toolchain
+    $open_tfa
+    $platform_name
+    $soc_cfg
+  )
+
+  print " => Building 8MB NOR FLASH IMAGE"
+
+  let build_dir = (
+    [$ctx.workspace "Build" $platform_name $"($release_type)_($toolchain)" "FV"]
+    | path join
+  )
+  let flash_fd = [$build_dir "NOR_FLASH_IMAGE.fd"] | path join
+  let flash_img = [$ctx.workspace "RK3588_NOR_FLASH.img"] | path join
+  let gpt_img = [$ctx.rootdir "misc" "rk3588_spi_nor_gpt.img"] | path join
+  let idblock = [$ctx.workspace "idblock.bin"] | path join
+  let fit_image = [$ctx.workspace $"($device)_EFI.itb"] | path join
+
+  ^cp $flash_fd $flash_img
+  ^dd $"if=($gpt_img)" $"of=($flash_img)"
+  ^dd $"if=($idblock)" $"of=($flash_img)" bs=1K seek=32
+  ^dd $"if=($fit_image)" $"of=($flash_img)" bs=1K seek=1024
+  ^cp $flash_img $ctx.rootdir
+}
+
+def --env build-device [
+  ctx: record
+  device: string
+  release_type: string
+  toolchain: string
+  open_tfa: bool
+  tfa_flags: string
+  edk2_flags: string
+  skip_patchsets: bool
+  git_commit: string
+] {
+  let device_cfg = load-config ([$ctx.rootdir "configs" $"($device).conf"] | path join)
+  let soc = (cfg-get $device_cfg "SOC")
+  let soc_cfg = load-config ([$ctx.rootdir "configs" $"($soc).conf"] | path join)
+  let platform_name = (cfg-get $device_cfg "PLATFORM_NAME")
+  let dsc_file = (cfg-get $device_cfg "DSC_FILE")
+  let tfa_plat = (cfg-get $soc_cfg "TFA_PLAT")
+
+  let ctx = $ctx | upsert soc $soc
+
+  rm-glob ([$ctx.outdir "RK35*_NOR_FLASH.img"] | path join)
+
+  if $open_tfa {
+    (apply-patchset
+      ([$ctx.rootdir "arm-trusted-firmware-patches"] | path join)
+      ([$ctx.rootdir "arm-trusted-firmware"] | path join)
+      $skip_patchsets
+    )
+
+    let debug = if $release_type == "DEBUG" { "1" } else { "0" }
+    mut tfa_cmd = $"make PLAT=(shell-quote $tfa_plat) DEBUG=($debug) all"
+    if $tfa_flags != "" {
+      $tfa_cmd = $"($tfa_cmd) ($tfa_flags)"
+    }
+
+    run-bash-in ([$ctx.rootdir "arm-trusted-firmware"] | path join) $tfa_cmd
+  }
+
+  (apply-patchset
+    ([$ctx.rootdir "edk2-patches"] | path join)
+    ([$ctx.rootdir "edk2"] | path join)
+    $skip_patchsets
+  )
+  (apply-patchset
+    ([$ctx.rootdir "devicetree" "mainline" "patches"] | path join)
+    ([$ctx.rootdir "devicetree" "mainline" "upstream"] | path join)
+    $skip_patchsets
+  )
+
+  let conf_dir = [$ctx.workspace "Conf"] | path join
+  if not ($conf_dir | path exists) {
+    mkdir $conf_dir
+  }
+
+  let packages_path = (
+    [
+      $ctx.rootdir
+      ([$ctx.rootdir "devicetree"] | path join)
+      ([$ctx.rootdir "edk2"] | path join)
+      ([$ctx.rootdir "edk2-non-osi"] | path join)
+      ([$ctx.rootdir "edk2-platforms"] | path join)
+      ([$ctx.rootdir "edk2-rockchip"] | path join)
+      ([$ctx.rootdir "edk2-rockchip-non-osi"] | path join)
+    ]
+    | str join (char esep)
+  )
+
+  with-env {
+    WORKSPACE: $ctx.workspace
+    PACKAGES_PATH: $packages_path
+    GCC_AARCH64_PREFIX: $ctx.cross_compile
+    CLANG38_AARCH64_PREFIX: $ctx.cross_compile
+  } {
+    ^make -C ([$ctx.rootdir "edk2" "BaseTools"] | path join)
+
+    let edksetup = [$ctx.rootdir "edk2" "edksetup.sh"] | path join
+    let dsc_path = [$ctx.rootdir $dsc_file] | path join
+    mut build_cmd = [
+      $"source (shell-quote $edksetup)"
+      "&&"
+      "build"
+      "-s"
+      "-n 0"
+      "-a AARCH64"
+      $"-t (shell-quote $toolchain)"
+      $"-p (shell-quote $dsc_path)"
+      $"-b (shell-quote $release_type)"
+      $"-D FIRMWARE_VER=(shell-quote $git_commit)"
+      "-D NETWORK_ALLOW_HTTP_CONNECTIONS=TRUE"
+      "-D NETWORK_ISCSI_ENABLE=TRUE"
+      "-D INCLUDE_TFTP_COMMAND=TRUE"
+      "--pcd gRockchipTokenSpaceGuid.PcdFitImageFlashAddress=0x100000"
+    ] | str join " "
+
+    if $edk2_flags != "" {
+        $build_cmd = $"($build_cmd) ($edk2_flags)"
+    }
+
+    run-bash-in $ctx.rootdir $build_cmd
+  }
+
+  (pack-image
+    $ctx
+    $device
+    $release_type
+    $toolchain
+    $open_tfa
+    $platform_name
+    $soc_cfg
+  )
+  print "Build done: RK3588_NOR_FLASH.img"
+}
+
+def clean [outdir: path] {
+  let workspace = [$outdir "workspace"] | path join
+  if ($workspace | path exists) {
+    rm --recursive --force $workspace
+  }
+
+  for img in (glob ([$outdir "RK3588_*.img"] | path join)) {
+    rm --force $img
+  }
+}
+
+def distclean [rootdir: path, outdir: path] {
+  if (([$rootdir ".git"] | path join) | path exists) {
+    run-bash-in $rootdir "git clean -xdf"
+  } else {
+    clean $outdir
+  }
+}
+
+# Build EDK2 firmware for Rockchip RK3588 platforms.
+export def --env main [
+  --device(-d): string              # Build for this device, or `all` for every board config.
+  --release(-r): string = "DEBUG"   # Build profile passed to TF-A and EDK2: `DEBUG` or `RELEASE`.
+  --toolchain(-t): string = "GCC"   # EDK2 toolchain tag, for example `GCC`.
+  --vendor-tfa                      # Use BL31 from `misc/rkbin` instead of building `arm-trusted-firmware`.
+  --tfa-flags: string = ""          # Extra flags appended verbatim to the TF-A `make` command.
+  --edk2-flags: string = ""         # Extra flags appended verbatim to the EDK2 `build` command.
+  --skip-patchsets                  # Skip reapplying local patchsets to upstream submodules.
+  --clean(-C)                       # Remove the workspace and generated flash images from the current output dir.
+  --distclean(-D)                   # Run `git clean -xdf` from the repo root when available.
+] {
+  let outdir = $env.PWD | path expand
+
+  if $distclean {
+    distclean $rootdir $outdir
+    return
+  }
+
+  if $clean {
+    clean $outdir
+    return
+  }
+
+  let normalized_device = if ($device | is-empty) { "" } else {
+    $device | str downcase
+  }
+  if $normalized_device == "" {
+    error make "Missing required option: --device. See `build.nu --help`."
+  }
+
+  let device_config = [$rootdir "configs" $"($normalized_device).conf"] | path join
+  if ($normalized_device != "all") and not ($device_config | path exists) {
+    error make "Device configuration not found"
+  }
+
+  let raw_machine_type = (^uname -m | str trim)
+  let machine_type = if $raw_machine_type == "arm64" {
+    "aarch64"
+  } else if $raw_machine_type == "amd64" {
+    "x86_64"
+  } else {
+    $raw_machine_type
+  }
+
+  if ($machine_type != "aarch64") and (($env.CROSS_COMPILE? | default "") == "") {
+    $env.CROSS_COMPILE = "aarch64-linux-gnu-"
+  }
+
+  let describe = (^git describe --tags --always | complete)
+  let git_commit = if $describe.exit_code == 0 {
+    $describe.stdout | str trim
+  } else {
+    "unknown"
+  }
+
+  let workspace = [$outdir "workspace"] | path join
+  if not ($workspace | path exists) {
+    mkdir $workspace
+  }
+
+  cd $rootdir
+
+  let ctx = {
+    rootdir: $rootdir
+    outdir: $outdir
+    workspace: $workspace
+    machine_type: $machine_type
+    cross_compile: ($env.CROSS_COMPILE? | default "")
+    soc: ""
+  }
+
+  let release_type = $release | str upcase
+  let open_tfa = (not $vendor_tfa)
+
+  if $normalized_device == "all" {
+    let devices = (
+      ls ([$rootdir "configs"] | path join)
+      | where {|entry|
+          ($entry.type == "file") and ((($entry.name | path parse).extension | default "") == "conf")
+      }
+      | get name
+      | each {|name| $name | path basename | str replace --regex '\.conf$' "" }
+      | where {|name| $name != "RK3588" }
+      | sort
+    )
+
+    for dev in $devices {
+      print $"Building ($dev)"
+      (build-device
+        $ctx
+        $dev
+        $release_type
+        $toolchain
+        $open_tfa
+        $tfa_flags
+        $edk2_flags
+        $skip_patchsets
+        $git_commit
+      )
+    }
+  } else {
+    (build-device
+      $ctx
+      $normalized_device
+      $release_type
+      $toolchain
+      $open_tfa
+      $tfa_flags
+      $edk2_flags
+      $skip_patchsets
+      $git_commit
+    )
+  }
+}

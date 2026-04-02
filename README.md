@@ -398,12 +398,12 @@ The firmware can only be built on Linux currently. For Windows use WSL.
 
    For Ubuntu/Debian:
    ```bash
-   sudo apt install git gcc g++ build-essential gcc-aarch64-linux-gnu acpica-tools python3-pyelftools uuid-dev python-is-python3 device-tree-compiler
+   sudo apt install git gcc g++ build-essential gcc-aarch64-linux-gnu acpica-tools python3-pyelftools uuid-dev python-is-python3 device-tree-compiler nushell
    ```
    For Arch Linux:
    ```bash
    sudo pacman -Syu
-   sudo pacman -S git base-devel gcc dtc aarch64-linux-gnu-binutils aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc python python-pyelftools iasl --needed
+   sudo pacman -S git base-devel gcc dtc aarch64-linux-gnu-binutils aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc python python-pyelftools iasl nushell --needed
    ```
 
 2. Clone the repository:
@@ -414,7 +414,7 @@ The firmware can only be built on Linux currently. For Windows use WSL.
 
 3. Build UEFI (ROCK 5B for example, check [list of platform configs](https://github.com/edk2-porting/edk2-rk3588/tree/master/configs)):
    ```bash
-   ./build.sh --device rock-5b --release Release # (or Debug)
+   ./build.nu --device rock-5b --release Release # (or Debug)
    ```
 
 If you get build errors, it is very likely that you're still missing some dependencies. The list of packages above is not complete and depending on the distro you may need to install additional ones. In most cases, looking up the error messages on the internet will point you at the right packages.
