@@ -333,10 +333,9 @@ def build-device [
   )
   let edk_tools_path = [$ctx.rootdir "edk2" "BaseTools"] | path join
   let conf_path = $conf_dir
-  let path_dirs = [
-    ([$edk_tools_path "BinWrappers" "PosixLike"] | path join)
-    ($env.PATH? | default "")
-  ] | where {|entry| $entry != "" }
+  let path_dirs = $env.PATH
+  | prepend ([$edk_tools_path "BinWrappers" "PosixLike"] | path join)
+  | where {|entry| $entry != "" }
   let build_tool = [$edk_tools_path "BinWrappers" "PosixLike" "build"] | path join
 
   with-env {
@@ -344,11 +343,11 @@ def build-device [
     PACKAGES_PATH: $packages_path
     EDK_TOOLS_PATH: $edk_tools_path
     CONF_PATH: $conf_path
-    PATH: ($path_dirs | str join (char esep))
+    PATH: $path_dirs
     GCC_AARCH64_PREFIX: $ctx.cross_compile
     CLANG38_AARCH64_PREFIX: $ctx.cross_compile
   } {
-    ^make -C ([$ctx.rootdir "edk2" "BaseTools"] | path join)
+    make -C ([$ctx.rootdir "edk2" "BaseTools"] | path join)
 
     let dsc_path = [$ctx.rootdir $dsc_file] | path join
     dirs add $ctx.rootdir
