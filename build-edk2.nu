@@ -403,8 +403,14 @@ export def main [
   }
 
   let machine_type = (uname | get machine)
-  if ($machine_type != "aarch64") and (($env.CROSS_COMPILE? | default "") == "") {
-    $env.CROSS_COMPILE = "aarch64-linux-gnu-"
+  $env.CROSS_COMPILE = if ($machine_type != "aarch64") and (($env.CROSS_COMPILE? | default "") == "") {
+    if (sys host | get name | $in =~ SUSE ) {
+      "aarch64-suse-linux-"
+    } else {
+      "aarch64-linux-gnu-"
+    }  
+  } else {
+    $env.CROSS_COMPILE
   }
 
   dirs add $rootdir
@@ -429,16 +435,8 @@ export def main [
 
   let open_tfa = (not $vendor_tfa)
 
-  $devices
-  | default -e $allowed_devices
-  | each {|dev|
-    ignore;
-    print $"Building ($dev)";
-    try {
-      build-device $ctx $dev ($release | str upcase) $toolchain $open_tfa $tfa_flags $edk2_flags $skip_patchsets $git_commit
-    } catch {|e|
-      error make -u $"Build failed with error: ($e.msg)"
-    }
+  for dev in ($devices | default -e $allowed_devices) {
+    print $"Building ($dev)"
+    build-device $ctx $dev ($release | str upcase) $toolchain $open_tfa $tfa_flags $edk2_flags $skip_patchsets $git_commit
   }
-  | ignore
 }
