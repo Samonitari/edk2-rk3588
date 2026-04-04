@@ -86,15 +86,29 @@ jobs:
           let version = (git describe --tags --always | str trim)
           $"version=($version)\n" | save --raw --append $env.GITHUB_OUTPUT
 
+      - name: Restore Secure Boot key cache
+        uses: actions/cache@v4
+        with:
+          path: keys
+          key: uefi-public-keys-v1
+
       - name: Set up Secure Boot default keys
         run: |
           mkdir keys
           # We don't really need a usable PK, so just generate a public key for it and discard the private key
           ^openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Rockchip Platform Key/" -keyout /dev/null -outform DER -out keys/pk.cer -days 7300 -nodes -sha256
-          http get https://go.microsoft.com/fwlink/?LinkId=321185 | save keys/ms_kek.cer
-          http get https://go.microsoft.com/fwlink/?linkid=321192 | save keys/ms_db1.cer
-          http get https://go.microsoft.com/fwlink/?linkid=321194 | save keys/ms_db2.cer
-          http get https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin | save keys/arm64_dbx.bin
+          if not ("keys/ms_kek.cer" | path exists) {
+            http get https://go.microsoft.com/fwlink/?LinkId=321185 | save keys/ms_kek.cer
+          }
+          if not ("keys/ms_db1.cer" | path exists) {
+            http get https://go.microsoft.com/fwlink/?linkid=321192 | save keys/ms_db1.cer
+          }
+          if not ("keys/ms_db2.cer" | path exists) {
+            http get https://go.microsoft.com/fwlink/?linkid=321194 | save keys/ms_db2.cer
+          }
+          if not ("keys/arm64_dbx.bin" | path exists) {
+            http get https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin | save keys/arm64_dbx.bin
+          }
 
       - name: Build platform
         run: |
