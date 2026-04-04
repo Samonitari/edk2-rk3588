@@ -1,0 +1,3 @@
+miniall_ini: RK3588MINIALL.ini
+tfa_plat: rk3588_reference_pmic
+trust_ini: RK3588TRUST.ini

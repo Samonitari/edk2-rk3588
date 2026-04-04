@@ -1,0 +1,3 @@
+dsc_file: edk2-rockchip/Platform/Ameridroid/IndiedroidNova/IndiedroidNova.dsc
+platform_name: IndiedroidNova
+soc: RK3588

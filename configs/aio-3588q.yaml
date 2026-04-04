@@ -1,0 +1,3 @@
+dsc_file: edk2-rockchip/Platform/Firefly/AIO-3588Q/AIO-3588Q.dsc
+platform_name: AIO-3588Q
+soc: RK3588

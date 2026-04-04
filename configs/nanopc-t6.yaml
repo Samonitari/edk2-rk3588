@@ -1,0 +1,3 @@
+dsc_file: edk2-rockchip/Platform/FriendlyElec/NanoPC-T6/NanoPC-T6.dsc
+platform_name: NanoPC-T6
+soc: RK3588

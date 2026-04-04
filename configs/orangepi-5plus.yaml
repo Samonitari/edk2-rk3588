@@ -1,0 +1,3 @@
+dsc_file: edk2-rockchip/Platform/OrangePi/OrangePi5Plus/OrangePi5Plus.dsc
+platform_name: OrangePi5Plus
+soc: RK3588

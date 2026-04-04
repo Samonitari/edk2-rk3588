@@ -1,0 +1,3 @@
+dsc_file: edk2-rockchip/Platform/FriendlyElec/NanoPi-M6/NanoPi-M6.dsc
+platform_name: NanoPi-M6
+soc: RK3588

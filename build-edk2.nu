@@ -6,37 +6,11 @@ def allowed-release-types []: nothing -> list<string> {[DEBUG RELEASE]}
 
 def allowed-devices []: nothing -> list<string> {
   ls ([$rootdir configs] | path join)
+  | where {|entry| (($entry.name | path parse).extension | default "") == "yaml" }
   | get name
   | path basename
   | path parse
   | get stem
-}
-
-def load-config [config_path: path] {
-  if not ($config_path | path exists) {
-    error make $"Configuration not found: ($config_path)"
-  }
-
-  open $config_path
-  | lines
-  | where {|line|
-    let trimmed = $line | str trim
-    ($trimmed != "") and (not ($trimmed | str starts-with "#"))
-  }
-  | reduce -f {} {|line, acc|
-    let parts = $line | split row "="
-    let key = $parts | first | str trim
-    let value = $parts | skip 1 | str join "=" | str trim
-    $acc | upsert $key $value
-  }
-}
-
-def cfg-get [cfg: record, key: string] {
-  if $key in ($cfg | columns) {
-    $cfg | get $key
-  } else {
-    error make $"Missing required config key: ($key)"
-  }
 }
 
 def require-path [path: path, label: string] {
@@ -139,8 +113,7 @@ def apply-patchset [patches_dir: path, target_dir: path, skip_patchsets: bool] {
 def build-idblock [ctx: record, soc_cfg: record] {
   print " => Building idblock.bin"
 
-  let miniall_ini = (cfg-get $soc_cfg "MINIALL_INI")
-  let rkboot_ini = [$ctx.rootdir "misc" "rkbin" "RKBOOT" $miniall_ini] | path join
+  let rkboot_ini = [$ctx.rootdir "misc" "rkbin" "RKBOOT" $soc_cfg.miniall_ini] | path join
   let ddrbin_rkbin = (ini-value $rkboot_ini "FlashData")
   let ddrbin = [$ctx.rootdir "misc" "rkbin" $ddrbin_rkbin] | path join
   let spl = [$ctx.rootdir "misc" "rk3588_spl_v1.12.bin"] | path join
@@ -173,8 +146,8 @@ def build-fit [
 ] {
   print " => Building FIT"
 
-  let trust_ini = (cfg-get $soc_cfg "TRUST_INI")
-  let tfa_plat = (cfg-get $soc_cfg "TFA_PLAT")
+  let trust_ini = $soc_cfg.trust_ini
+  let tfa_plat = $soc_cfg.tfa_plat
   let trust_path = [$ctx.rootdir "misc" "rkbin" "RKTRUST" $trust_ini] | path join
   let soc_l = $ctx.soc | str downcase
   let bl31_rkbin = (ini-regex-value $trust_path '^PATH=.*_bl31_')
@@ -284,14 +257,13 @@ def build-device [
   skip_patchsets: bool
   git_commit: string
 ] {
-  let device_cfg = load-config ([$ctx.rootdir "configs" $"($device).conf"] | path join)
-  let soc = (cfg-get $device_cfg "SOC")
-  let soc_cfg = load-config ([$ctx.rootdir "configs" $"($soc).conf"] | path join)
-  let platform_name = (cfg-get $device_cfg "PLATFORM_NAME")
-  let dsc_file = (cfg-get $device_cfg "DSC_FILE")
-  let tfa_plat = (cfg-get $soc_cfg "TFA_PLAT")
+  let device_cfg = open ([$ctx.rootdir "configs" $"($device).yaml"] | path join)
+  let soc_cfg = open ([$ctx.rootdir "configs" $"($device_cfg.soc).yaml"] | path join)
+  let platform_name = $device_cfg.platform_name
+  let dsc_file = $device_cfg.dsc_file
+  let tfa_plat = $soc_cfg.tfa_plat
 
-  let ctx = $ctx | upsert soc $soc
+  let ctx = $ctx | upsert soc $device_cfg.soc
 
   rm-glob ([$ctx.outdir "RK35*_NOR_FLASH.img"] | path join)
 
@@ -411,6 +383,7 @@ export def main [
   } else {
     $env.CROSS_COMPILE
   }
+  
 
   dirs add $rootdir
   let git_commit = git describe --tags --always | complete

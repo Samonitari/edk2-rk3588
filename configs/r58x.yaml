@@ -1,0 +1,3 @@
+dsc_file: edk2-rockchip/Platform/Mekotronics/R58X/R58X.dsc
+platform_name: R58X
+soc: RK3588
