@@ -20,6 +20,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      NUSHELL_VERSION: 0.104.1
     strategy:
       matrix:
         PLATFORM:
@@ -53,55 +55,68 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Install Nushell
         shell: bash
         run: |
-          sudo apt-get update && \
-          sudo apt-get install -y \
-          acpica-tools \
-          binutils-aarch64-linux-gnu \
-          build-essential \
-          device-tree-compiler \
-          gettext \
-          git \
-          gcc-aarch64-linux-gnu \
-          libc6-dev-arm64-cross \
-          python3 \
-          python3-pyelftools \
-          uuid-dev
+          curl -fsSL -o "${RUNNER_TEMP}/nu.tar.gz" \
+            "https://github.com/nushell/nushell/releases/download/${NUSHELL_VERSION}/nu-${NUSHELL_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/nushell"
+          tar -xzf "${RUNNER_TEMP}/nu.tar.gz" -C "${RUNNER_TEMP}/nushell" --strip-components=1
+          echo "${RUNNER_TEMP}/nushell" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/nushell/nu" --version
+
+      - name: Install dependencies
+        shell: nu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ...[
+            acpica-tools
+            binutils-aarch64-linux-gnu
+            build-essential
+            device-tree-compiler
+            gettext
+            git
+            gcc-aarch64-linux-gnu
+            libc6-dev-arm64-cross
+            python3
+            python-is-python3
+            python3-pyelftools
+            uuid-dev
+          ]
 
       - name: Get version tag
         id: get_version_tag
-        shell: bash
-        run: echo "version=$(git describe --tags --always)" >> $GITHUB_OUTPUT
+        shell: nu {0}
+        run: |
+          let version = (git describe --tags --always | str trim)
+          $"version=($version)\n" | save --raw --append $env.GITHUB_OUTPUT
 
       - name: Set up Secure Boot default keys
+        shell: nu {0}
         run: |
           mkdir keys
           # We don't really need a usable PK, so just generate a public key for it and discard the private key
-          openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Rockchip Platform Key/" -keyout /dev/null -outform DER -out keys/pk.cer -days 7300 -nodes -sha256
-          curl -L https://go.microsoft.com/fwlink/?LinkId=321185 -o keys/ms_kek.cer
-          curl -L https://go.microsoft.com/fwlink/?linkid=321192 -o keys/ms_db1.cer
-          curl -L https://go.microsoft.com/fwlink/?linkid=321194 -o keys/ms_db2.cer
-          curl -L https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin -o keys/arm64_dbx.bin
+          ^openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Rockchip Platform Key/" -keyout /dev/null -outform DER -out keys/pk.cer -days 7300 -nodes -sha256
+          http get https://go.microsoft.com/fwlink/?LinkId=321185 | save keys/ms_kek.cer
+          http get https://go.microsoft.com/fwlink/?linkid=321192 | save keys/ms_db1.cer
+          http get https://go.microsoft.com/fwlink/?linkid=321194 | save keys/ms_db2.cer
+          http get https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin | save keys/arm64_dbx.bin
 
       - name: Build platform
-        shell: bash
+        shell: nu {0}
         run: |
-          export EDK2_SECUREBOOT_FLAGS=" \
-              -D DEFAULT_KEYS=TRUE \
-              -D PK_DEFAULT_FILE=keys/pk.cer \
-              -D KEK_DEFAULT_FILE1=keys/ms_kek.cer \
-              -D DB_DEFAULT_FILE1=keys/ms_db1.cer \
-              -D DB_DEFAULT_FILE2=keys/ms_db2.cer \
-              -D DBX_DEFAULT_FILE1=keys/arm64_dbx.bin \
-              -D SECURE_BOOT_ENABLE=TRUE"
+          let edk2_secureboot_flags = [
+            -D DEFAULT_KEYS=TRUE
+            -D PK_DEFAULT_FILE=keys/pk.cer
+            -D KEK_DEFAULT_FILE1=keys/ms_kek.cer
+            -D DB_DEFAULT_FILE1=keys/ms_db1.cer
+            -D DB_DEFAULT_FILE2=keys/ms_db2.cer
+            -D DBX_DEFAULT_FILE1=keys/arm64_dbx.bin
+            -D SECURE_BOOT_ENABLE=TRUE
+          ]
 
-          export EDK2_BUILD_FLAGS=" \
-              ${EDK2_SECUREBOOT_FLAGS}"
-
-          ./build.sh --device ${{matrix.PLATFORM}} --release ${{matrix.CONFIGURATION}} --edk2-flags "${EDK2_BUILD_FLAGS}"
-          mv RK3588_NOR_FLASH.img ${{matrix.PLATFORM}}_UEFI_${{matrix.CONFIGURATION}}_${{steps.get_version_tag.outputs.version}}.img
+          ./build-edk2.nu ${{ matrix.PLATFORM }} --release ${{ matrix.CONFIGURATION }} --edk2-flags $edk2_secureboot_flags
+          mv RK3588_NOR_FLASH.img $"${{ matrix.PLATFORM }}_UEFI_${{ matrix.CONFIGURATION }}_${{ steps.get_version_tag.outputs.version }}.img"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
