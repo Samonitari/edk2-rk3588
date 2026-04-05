@@ -373,9 +373,13 @@ export def main [
     error make -u $"Unknown release type: ($release)\t\nAllowed ones \(automatically upcased\): (allowed-release-types)"
   }
 
+  # For CI
+  $env.DIRS_LIST = [(pwd)]
+  $env.DIRS_POSITION = 0
+
   let machine_type = (uname | get machine)
   $env.CROSS_COMPILE = if ($machine_type != "aarch64") and (($env.CROSS_COMPILE? | default "") == "") {
-    if (sys host | get name | $in =~ SUSE ) {
+    if ((sys host | get name) =~ SUSE) {
       "aarch64-suse-linux-"
     } else {
       "aarch64-linux-gnu-"
