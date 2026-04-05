@@ -27,29 +27,29 @@ jobs:
     strategy:
       matrix:
         PLATFORM:
-          - aio-3588q
-          - blade3
-          - edge2
-          - fydetab-duo
-          - h88k
-          - indiedroid-nova
-          - itx-3588j
-          - nanopc-cm3588-nas
-          - nanopc-t6
-          - nanopi-m6
-          - nanopi-r6c
-          - nanopi-r6s
-          - orangepi-5
-          - orangepi-5plus
-          - powerstation-6
-          - r58-mini
-          - r58x
-          - roc-rk3588s-pc
-          - rock-5-itx
-          - rock-5a
+          # - aio-3588q
+          # - blade3
+          # - edge2
+          # - fydetab-duo
+          # - h88k
+          # - indiedroid-nova
+          # - itx-3588j
+          # - nanopc-cm3588-nas
+          # - nanopc-t6
+          # - nanopi-m6
+          # - nanopi-r6c
+          # - nanopi-r6s
+          # - orangepi-5
+          # - orangepi-5plus
+          # - powerstation-6
+          # - r58-mini
+          # - r58x
+          # - roc-rk3588s-pc
+          # - rock-5-itx
+          # - rock-5a
           - rock-5b
-          - rock-5bplus
-          - station-m3
+          # - rock-5bplus
+          # - station-m3
         CONFIGURATION: ${{ fromJSON(format('[{0}]', inputs.build-configs || '"Debug"')) }}
     steps:
       - name: Setup Nushell
@@ -98,16 +98,16 @@ jobs:
           # We don't really need a usable PK, so just generate a public key for it and discard the private key
           ^openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Rockchip Platform Key/" -keyout /dev/null -outform DER -out keys/pk.cer -days 7300 -nodes -sha256
           if not ("keys/ms_kek.cer" | path exists) {
-            http get https://go.microsoft.com/fwlink/?LinkId=321185 | save keys/ms_kek.cer
+            http get -R f https://go.microsoft.com/fwlink/?LinkId=321185 | save keys/ms_kek.cer
           }
           if not ("keys/ms_db1.cer" | path exists) {
-            http get https://go.microsoft.com/fwlink/?linkid=321192 | save keys/ms_db1.cer
+            http get -R f https://go.microsoft.com/fwlink/?linkid=321192 | save keys/ms_db1.cer
           }
           if not ("keys/ms_db2.cer" | path exists) {
-            http get https://go.microsoft.com/fwlink/?linkid=321194 | save keys/ms_db2.cer
+            http get -R f https://go.microsoft.com/fwlink/?linkid=321194 | save keys/ms_db2.cer
           }
           if not ("keys/arm64_dbx.bin" | path exists) {
-            http get https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin | save keys/arm64_dbx.bin
+            http get -R f -e https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin | save keys/arm64_dbx.bin
           }
 
       - name: Build platform
